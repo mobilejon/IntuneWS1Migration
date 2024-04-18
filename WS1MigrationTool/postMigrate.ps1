@@ -10,6 +10,7 @@ Steve Weiner
 .CONTRIBUTORS
 Logan Lautt
 Jesse Weimer
+Jon Towles
 #>
 
 $ErrorActionPreference = "SilentlyContinue"
@@ -78,23 +79,6 @@ function disablePostMigrateTask()
     log "postMigrate task disabled"
 }
 
-# get device info
-function getDeviceInfo()
-{
-    Param(
-        [string]$hostname = $env:COMPUTERNAME,
-        [string]$serialNumber = (Get-WmiObject -Class Win32_BIOS | Select-Object SerialNumber).SerialNumber
-    )
-    $global:deviceInfo = @{
-        "hostname" = $hostname
-        "serialNumber" = $serialNumber
-    }
-    foreach($key in $deviceInfo.Keys)
-    {
-        log "$($key): $($deviceInfo[$key])"
-    }
-}
-
 # authenticate to MS Graph
 function msGraphAuthenticate()
 {
@@ -122,47 +106,51 @@ function msGraphAuthenticate()
     $global:headers = $headers
 }
 
-# get user graph info
-function getGraphInfo()
+# newDeviceObject function
+function newDeviceObject()
 {
     Param(
-        [string]$regPath = $settings.regPath,
-        [string]$regKey = "Registry::$regPath",
-        [string]$serialNumber = $deviceInfo.serialNumber,
-        [string]$intuneUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices",
-        [string]$userUri = "https://graph.microsoft.com/beta/users",
-        [string]$upn = (Get-ItemPropertyValue -Path "HKLM:\Software\IntuneMigration" -Name "UPN")
-    )
-    log "Getting graph info..."
-    $intuneObject = Invoke-RestMethod -Uri "$($intuneUri)?`$filter=contains(serialNumber,'$($serialNumber)')" -Headers $headers -Method Get
-    if(($intuneObject.'@odata.count') -eq 1)
+        [string]$serialNumber = (Get-WmiObject -Class Win32_Bios).serialNumber,
+        [string]$hostname = $env:COMPUTERNAME,
+        [string]$intuneId = ((Get-ChildItem Cert:\LocalMachine\My | Where-Object {$_.Issuer -match "Microsoft Intune MDM Device CA"} | Select-Object Subject).Subject).TrimStart("CN="),
+        [string]$entraDeviceId = ((Get-ChildItem Cert:\LocalMachine\My | Where-Object {$_.Issuer -match "MS-Organization-Access"} | Select-Object Subject).Subject).TrimStart("CN=")
+    )    
+    
+    $entraObjectId = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/devices?`$filter=deviceId eq '$($entraDeviceId)'" -Headers $headers).value.id
+    if([string]::IsNullOrEmpty($groupTag))
     {
-        $global:intuneID = $intuneObject.value.id
-        $global:aadDeviceID = $intuneObject.value.azureADDeviceId
-        log "Intune Device ID: $intuneID, Azure AD Device ID: $aadDeviceID, User ID: $userID"
+        try
+        {
+            $groupTag = (Get-ItemProperty -Path "HKLM:\SOFTWARE\IntuneMigration" -Name "OG_groupTag").OG_groupTag
+        }
+        catch
+        {
+            $groupTag = $null
+        }
     }
     else
     {
-        log "Intune object not found"
+        $groupTag = $groupTag
     }
-    $userObject = Invoke-RestMethod -Uri "$userUri/$upn" -Headers $headers -Method Get
-    if(![string]::IsNullOrEmpty($userObject.id))
-    {
-        $global:userID = $userObject.id
-        log "User ID: $userID"
+    $pc = @{
+        serialNumber = $serialNumber
+        hostname = $hostname
+        intuneId = $intuneId
+        groupTag = $groupTag
+        entraObjectId = $entraObjectId
     }
-    else
-    {
-        log "User object not found"
-    }
+    return $pc
 }
+
 
 # set primary user
 function setPrimaryUser()
 {
     Param(
-        [string]$intuneID = $intuneID,
-        [string]$userID = $userID,
+        [string]$regPath = $settings.regPath,
+        [string]$regKey = "Registry::$regPath",
+        [string]$intuneID = $pc.intuneId,
+        [string]$userID = (Get-ItemPropertyValue -Path $regKey -Name "UPN"),
         [string]$userUri = "https://graph.microsoft.com/beta/users/$userID",
         [string]$intuneDeviceRefUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$intuneID/users/`$ref"
     )
@@ -256,24 +244,6 @@ function manageBitlocker()
     }
 }
 
-# set setPrimaryUser task
-function setPrimaryUserTask()
-{
-    Param(
-        [string]$taskName = "setPrimaryUser",
-        [string]$taskXML = "$($localPath)\$($taskName).xml"
-    )
-    log "Setting $($taskName) task..."
-    if($taskXML)
-    {
-        schtasks.exe /Create /TN $taskName /XML $taskXML
-        log "$($taskName) task set."
-    }
-    else
-    {
-        log "Failed to set $($taskName) task: $taskXML not found"
-    }
-}
 # reset legal notice policy
 function resetLockScreenCaption()
 {
@@ -344,20 +314,6 @@ catch
     Exit 1
 }
 
-# get device info
-try
-{
-    getDeviceInfo
-    log "Device info retrieved"
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Device info not retrieved: $message"
-    log "Exiting script"
-    Exit 1
-}
-
 # authenticate to MS Graph
 try
 {
@@ -368,20 +324,6 @@ catch
 {
     $message = $_.Exception.Message
     log "MS Graph not authenticated: $message"
-    log "Exiting script"
-    Exit 1
-}
-
-# get graph info
-try
-{
-    getGraphInfo
-    log "Graph info retrieved"
-}
-catch
-{
-    $message = $_.Exception.Message
-    log "Graph info not retrieved: $message"
     log "Exiting script"
     Exit 1
 }
@@ -400,19 +342,34 @@ catch
     log "WARNING: Bitlocker not managed- try setting policy manually in Intune"
 }
 
-
-# set setPrimaryUser task
+# run newDeviceObject
+log "Running newDeviceObject..."
 try
 {
-    setPrimaryUserTask
-    log "setPrimaryUser task set"
+    $pc = newDeviceObject
+    log "newDeviceObject completed"
+
 }
 catch
 {
     $message = $_.Exception.Message
-    log "Failed to set setPrimaryUser task: $message"
-    log "Exiting script"
-    Exit 1
+    log "Failed to run newDeviceObject: $message"
+    log "Exiting script..."
+    exitScript -exitCode 4 -functionName "newDeviceObject"
+}
+
+
+# set primary user
+try
+{
+    setPrimaryUser
+    log "Primary user set"
+}
+catch
+{
+    $message = $_.Exception.Message
+    log "Primary user not set: $message"
+    log "WARNING: Primary user not set- try manually setting in Intune"
 }
 
 # reset lock screen caption

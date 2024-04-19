@@ -150,9 +150,10 @@ function setPrimaryUser()
         [string]$regPath = $settings.regPath,
         [string]$regKey = "Registry::$regPath",
         [string]$intuneID = $pc.intuneId,
-        [string]$userID = (Get-ItemPropertyValue -Path $regKey -Name "UPN"),
-        [string]$userUri = "https://graph.microsoft.com/beta/users/$userID",
-        [string]$intuneDeviceRefUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$intuneID/users/`$ref"
+        [string]$upn = (Get-ItemPropertyValue -Path $regKey -Name "UPN"),
+        [string]$intuneDeviceRefUri = "https://graph.microsoft.com/beta/deviceManagement/managedDevices/$intuneID/users/`$ref",
+		[string]$entraId = (Invoke-RestMethod -Method Get -Uri "https://graph.microsoft.com/beta/users/$($upn)" -Headers $headers).id,
+		[string]$userUri = "https://graph.microsoft.com/beta/users/$entraId"
     )
     log "Setting primary user..."
     $id = "@odata.id"

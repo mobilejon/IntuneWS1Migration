@@ -88,7 +88,7 @@ function setLockScreenCaption()
         [string]$legalCaptionName = "legalnoticecaption",
         [string]$legalCaptionValue = "Join $($targetTenantName)",
         [string]$legalTextName = "legalnoticetext",
-        [string]$text = "Sign in with your new $($targetTenantName) email address and password to start the migration process."
+        [string]$text = "Sign in with your new $($targetTenantName) email address and password to start the migration process. Once you sign in, do not do anything else as the device will reboot quickly after login."
     )
     log "Setting lock screen caption..."
     reg.exe add $legalPath /v $legalCaptionName /t REG_SZ /d $legalCaptionValue /f | Out-Host
